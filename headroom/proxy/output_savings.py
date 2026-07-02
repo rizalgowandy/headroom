@@ -162,6 +162,16 @@ class _Accum:
             return 0.0
         return max(0.0, (self.sumsq - self.sum * self.sum / self.n) / (self.n - 1))
 
+    def merge(self, other: _Accum) -> None:
+        """Fold another accumulator's observations into this one.
+
+        n / sum / sumsq are additive, so merging is element-wise addition and
+        is exactly equivalent to having ``add``-ed both observation streams.
+        """
+        self.n += other.n
+        self.sum += other.sum
+        self.sumsq += other.sumsq
+
     def to_dict(self) -> dict[str, float]:
         return {"n": self.n, "sum": self.sum, "sumsq": self.sumsq}
 
@@ -189,6 +199,19 @@ class BaselineModel:
     def observe(self, key: str, output_tokens: int) -> None:
         self.strata.setdefault(key, _Accum()).add(output_tokens)
         self.glob.add(output_tokens)
+
+    def merge(self, other: BaselineModel) -> None:
+        """Fold another baseline's observations into this one.
+
+        Per-stratum and global accumulators are additive, so merging is
+        element-wise and order-independent — the result is identical to having
+        observed both corpora against a single model. Used to aggregate a
+        cross-project baseline from per-project ``analyze`` results without
+        re-reading transcripts.
+        """
+        for key, acc in other.strata.items():
+            self.strata.setdefault(key, _Accum()).merge(acc)
+        self.glob.merge(other.glob)
 
     def lookup(self, key: str) -> tuple[float, float, int]:
         """Return ``(mean, var, n)`` for *key* with hierarchical back-off.
@@ -477,6 +500,12 @@ class SavingsRecorder:
             self._ledger.baseline = disk.baseline
 
     def _flush_locked(self) -> None:
+        from ..paths import process_is_stateless
+
+        if process_is_stateless():
+            # Stateless: keep the in-memory ledger but never write to disk.
+            self._since_flush = 0
+            return
         try:
             self._reload_baseline_locked()
             self._ledger.save(self._path)
